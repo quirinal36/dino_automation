@@ -86,8 +86,8 @@ class DinoGameBot:
         dark_ratio = dark_pixels / total_pixels
         
         # 어두운 픽셀이 일정 비율 이상이면 장애물로 판단
-        # (전체 픽셀의 10% 이상이 어두우면 장애물로 간주)
-        is_dark = dark_ratio > 0.1
+        # (전체 픽셀의 5% 이상이 어두우면 장애물로 간주)
+        is_dark = dark_ratio > 0.05
         
         return is_dark, avg_brightness, dark_ratio
     
