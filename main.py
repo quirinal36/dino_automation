@@ -11,6 +11,50 @@ import json
 import os
 import time
 from datetime import datetime
+import math
+
+
+class SpeedController:
+    """게임 속도에 따른 동적 파라미터 관리"""
+
+    def __init__(self):
+        self.start_time = None
+        self.MAX_SPEED_FACTOR = 2.17
+        self.TIME_TO_MAX = 180.0  # 3분
+
+        # 기본 파라미터
+        self.BASE_CHECK_INTERVAL = 0.05
+        self.BASE_JUMP_COOLDOWN = 0.30
+        self.BASE_DARK_RATIO = 0.05
+        self.MIN_DARK_RATIO = 0.03
+
+    def start(self):
+        """게임 시작 시 호출"""
+        self.start_time = time.time()
+
+    def get_speed_factor(self):
+        """현재 속도 배율 계산 (1.0 ~ 2.17)"""
+        if self.start_time is None:
+            return 1.0
+        elapsed = time.time() - self.start_time
+        if elapsed >= self.TIME_TO_MAX:
+            return self.MAX_SPEED_FACTOR
+        progress = elapsed / self.TIME_TO_MAX
+        return 1.0 + (self.MAX_SPEED_FACTOR - 1.0) * (math.log(1 + 2 * progress) / math.log(3))
+
+    def get_check_interval(self):
+        """동적 체크 간격 반환"""
+        return self.BASE_CHECK_INTERVAL / self.get_speed_factor()
+
+    def get_jump_cooldown(self):
+        """동적 점프 쿨다운 반환"""
+        return self.BASE_JUMP_COOLDOWN / self.get_speed_factor()
+
+    def get_dark_ratio_threshold(self):
+        """동적 어두운 픽셀 비율 임계값 반환"""
+        factor = self.get_speed_factor()
+        return self.BASE_DARK_RATIO - (self.BASE_DARK_RATIO - self.MIN_DARK_RATIO) * (factor - 1.0) / (self.MAX_SPEED_FACTOR - 1.0)
+
 
 class DinoGameBot:
     def __init__(self, config_file='roi_config.json'):
@@ -20,12 +64,20 @@ class DinoGameBot:
         self.running = False
         self.jump_count = 0
         self.debug_folder = 'debug_captures'
-        
-        # 디버그 폴더 생성
-        if not os.path.exists(self.debug_folder):
+        self.speed_controller = SpeedController()
+        self.dark_mode = False  # 다크 모드 여부
+
+        # 디버그 폴더 초기화 (기존 파일 삭제 후 재생성)
+        if os.path.exists(self.debug_folder):
+            for file in os.listdir(self.debug_folder):
+                file_path = os.path.join(self.debug_folder, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            print(f"디버그 폴더 초기화: {self.debug_folder}")
+        else:
             os.makedirs(self.debug_folder)
             print(f"디버그 폴더 생성: {self.debug_folder}")
-        
+
         # ROI 설정 로드
         self.load_roi_config()
         
@@ -63,33 +115,54 @@ class DinoGameBot:
         
         return roi_img
     
-    def is_dark_detected(self, roi_img, threshold=128):
+    def check_dark_mode(self, dark_ratio):
         """
-        ROI 영역에서 어두운 색상(검정 계열) 감지
-        
+        다크 모드 전환 감지
+        어두운 픽셀 비율이 95% 이상이면 다크 모드로 전환
+        밝은 픽셀 비율이 95% 이상이면 라이트 모드로 전환
+        """
+        if not self.dark_mode and dark_ratio >= 0.95:
+            self.dark_mode = True
+            print("\n[모드 전환] 다크 모드 감지 → 밝은 픽셀 감지로 전환\n")
+        elif self.dark_mode and dark_ratio <= 0.05:
+            self.dark_mode = False
+            print("\n[모드 전환] 라이트 모드 감지 → 어두운 픽셀 감지로 전환\n")
+
+    def is_obstacle_detected(self, roi_img, threshold=128, ratio_threshold=0.05):
+        """
+        ROI 영역에서 장애물 감지 (라이트/다크 모드 자동 대응)
+
         Args:
             roi_img: ROI 영역 이미지 (RGB)
-            threshold: 밝기 임계값 (0-255, 이 값보다 낮으면 어두운 것으로 판단)
-        
+            threshold: 밝기 임계값 (0-255)
+            ratio_threshold: 픽셀 비율 임계값 (동적 조정 가능)
+
         Returns:
-            bool: 어두운 색상이 감지되면 True
+            tuple: (장애물 감지 여부, 평균 밝기, 감지 비율)
         """
         # RGB를 그레이스케일로 변환
         gray = cv2.cvtColor(roi_img, cv2.COLOR_RGB2GRAY)
-        
+
         # 평균 밝기 계산
         avg_brightness = np.mean(gray)
-        
+
         # 어두운 픽셀 비율 계산
         dark_pixels = np.sum(gray < threshold)
         total_pixels = gray.size
         dark_ratio = dark_pixels / total_pixels
-        
-        # 어두운 픽셀이 일정 비율 이상이면 장애물로 판단
-        # (전체 픽셀의 5% 이상이 어두우면 장애물로 간주)
-        is_dark = dark_ratio > 0.05
-        
-        return is_dark, avg_brightness, dark_ratio
+
+        # 다크 모드 전환 체크
+        self.check_dark_mode(dark_ratio)
+
+        if self.dark_mode:
+            # 다크 모드: 밝은 픽셀(장애물)을 감지
+            light_ratio = 1.0 - dark_ratio
+            is_obstacle = light_ratio > ratio_threshold
+            return is_obstacle, avg_brightness, light_ratio
+        else:
+            # 라이트 모드: 어두운 픽셀(장애물)을 감지
+            is_obstacle = dark_ratio > ratio_threshold
+            return is_obstacle, avg_brightness, dark_ratio
     
     def save_debug_image(self, roi_img, jump_count):
         """디버그용 ROI 이미지 저장"""
@@ -108,56 +181,76 @@ class DinoGameBot:
         self.jump_count += 1
         print(f"점프! (총 {self.jump_count}번)")
     
-    def run(self, check_interval=0.05):
+    def run(self):
         """
-        게임 자동화 실행
-        
-        Args:
-            check_interval: ROI 체크 간격 (초)
+        게임 자동화 실행 (동적 속도 조정 적용)
         """
         if self.roi is None:
             print("ROI 설정이 로드되지 않았습니다.")
             return
-        
+
         print("\n" + "=" * 60)
         print("Chrome Dino Game Automation 시작")
         print("=" * 60)
-        print(f"ROI 체크 간격: {check_interval}초")
+        print(f"동적 속도 조정: 활성화")
+        print(f"  - 초기 체크 간격: {self.speed_controller.BASE_CHECK_INTERVAL*1000:.0f}ms")
+        print(f"  - 초기 쿨다운: {self.speed_controller.BASE_JUMP_COOLDOWN*1000:.0f}ms")
+        print(f"  - 최대 속도 배율: {self.speed_controller.MAX_SPEED_FACTOR:.2f}x (약 {self.speed_controller.TIME_TO_MAX:.0f}초 후)")
         print(f"디버그 이미지 저장 위치: {self.debug_folder}/")
         print("\n게임을 시작하세요!")
         print("종료하려면 Ctrl+C를 누르세요.")
         print("=" * 60 + "\n")
-        
+
         self.running = True
-        
+        self.speed_controller.start()
+        last_status_time = time.time()
+
         try:
             while self.running:
+                # 동적 파라미터 가져오기
+                check_interval = self.speed_controller.get_check_interval()
+                ratio_threshold = self.speed_controller.get_dark_ratio_threshold()
+                jump_cooldown = self.speed_controller.get_jump_cooldown()
+
+                # 10초마다 속도 상태 출력
+                if time.time() - last_status_time >= 10:
+                    factor = self.speed_controller.get_speed_factor()
+                    elapsed = time.time() - self.speed_controller.start_time
+                    mode_str = "다크" if self.dark_mode else "라이트"
+                    print(f"[속도] {elapsed:.0f}초 | {factor:.2f}x | 모드: {mode_str} | 체크: {check_interval*1000:.0f}ms | 쿨다운: {jump_cooldown*1000:.0f}ms | 임계값: {ratio_threshold*100:.1f}%")
+                    last_status_time = time.time()
+
                 # ROI 영역 캡처
                 roi_img = self.capture_roi()
-                
-                # 어두운 색상 감지
-                is_dark, avg_brightness, dark_ratio = self.is_dark_detected(roi_img)
-                
-                if is_dark:
+
+                # 장애물 감지 (라이트/다크 모드 자동 대응)
+                is_obstacle, avg_brightness, detect_ratio = self.is_obstacle_detected(
+                    roi_img, ratio_threshold=ratio_threshold
+                )
+
+                if is_obstacle:
                     # 점프 실행
                     self.jump()
-                    
+
                     # 디버그 이미지 저장
                     saved_file = self.save_debug_image(roi_img, self.jump_count)
-                    print(f"  - 평균 밝기: {avg_brightness:.1f}, 어두운 픽셀 비율: {dark_ratio*100:.1f}%")
+                    mode_str = "밝은" if self.dark_mode else "어두운"
+                    print(f"  - 평균 밝기: {avg_brightness:.1f}, {mode_str} 픽셀 비율: {detect_ratio*100:.1f}%")
                     print(f"  - 디버그 이미지 저장: {saved_file}")
-                    
-                    # 점프 후 잠시 대기 (연속 점프 방지)
-                    time.sleep(0.3)
-                
-                # 다음 체크까지 대기
+
+                    # 동적 쿨다운 적용
+                    time.sleep(jump_cooldown)
+
+                # 동적 체크 간격 적용
                 time.sleep(check_interval)
-                
+
         except KeyboardInterrupt:
+            elapsed = time.time() - self.speed_controller.start_time if self.speed_controller.start_time else 0
             print("\n\n사용자에 의해 중단되었습니다.")
+            print(f"총 플레이 시간: {elapsed:.1f}초")
             print(f"총 점프 횟수: {self.jump_count}번")
             print(f"디버그 이미지: {self.jump_count}개 저장됨")
-        
+
         self.running = False
 
 
@@ -186,8 +279,8 @@ def main():
         time.sleep(1)
     print("시작!\n")
     
-    # 봇 실행
-    bot.run(check_interval=0.05)  # 50ms마다 체크
+    # 봇 실행 (동적 속도 조정 자동 적용)
+    bot.run()
     
     print("\n프로그램이 종료되었습니다.")
 
