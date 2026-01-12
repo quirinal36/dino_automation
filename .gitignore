@@ -38,10 +38,10 @@ venv.bak/
 *~
 
 # Debug captures (게임 자동화 디버그 이미지)
-debug_captures/
+debug_captures*/**
 
 # ROI config (개인 설정 파일)
-roi_config.json
+roi_config*.json
 
 # OS
 .DS_Store

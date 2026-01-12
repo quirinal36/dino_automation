@@ -10,6 +10,7 @@ from PIL import ImageGrab
 import json
 import os
 import time
+import shutil
 from datetime import datetime
 import math
 
@@ -66,17 +67,19 @@ class DinoGameBot:
         self.debug_folder = 'debug_captures'
         self.speed_controller = SpeedController()
         self.dark_mode = False  # 다크 모드 여부
+        self.play_start_time = None  # 플레이 시작 시간
+        self.report_file = 'report.json'
 
-        # 디버그 폴더 초기화 (기존 파일 삭제 후 재생성)
+        # 기존 디버그 폴더가 있으면 타임스탬프로 이동
         if os.path.exists(self.debug_folder):
-            for file in os.listdir(self.debug_folder):
-                file_path = os.path.join(self.debug_folder, file)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-            print(f"디버그 폴더 초기화: {self.debug_folder}")
-        else:
-            os.makedirs(self.debug_folder)
-            print(f"디버그 폴더 생성: {self.debug_folder}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_folder_name = f"{self.debug_folder}_{timestamp}"
+            shutil.move(self.debug_folder, new_folder_name)
+            print(f"기존 디버그 폴더 이동: {self.debug_folder} → {new_folder_name}")
+
+        # 새 디버그 폴더 생성
+        os.makedirs(self.debug_folder)
+        print(f"디버그 폴더 생성: {self.debug_folder}")
 
         # ROI 설정 로드
         self.load_roi_config()
@@ -180,6 +183,36 @@ class DinoGameBot:
         pyautogui.press('space')
         self.jump_count += 1
         print(f"점프! (총 {self.jump_count}번)")
+
+    def save_report(self, elapsed_time):
+        """플레이 결과를 report.json에 저장"""
+        # 디버그 이미지 갯수 계산
+        debug_image_count = len([f for f in os.listdir(self.debug_folder) if f.endswith('.png')])
+
+        # 플레이 결과 데이터
+        play_result = {
+            "play_start_time": self.play_start_time.strftime("%Y-%m-%d %H:%M:%S") if self.play_start_time else None,
+            "total_play_time_seconds": round(elapsed_time, 1),
+            "jump_count": self.jump_count,
+            "debug_image_count": debug_image_count,
+            "roi": self.roi
+        }
+
+        # 기존 report.json 로드 또는 새로 생성
+        if os.path.exists(self.report_file):
+            with open(self.report_file, 'r', encoding='utf-8') as f:
+                report_data = json.load(f)
+        else:
+            report_data = {"play_history": []}
+
+        # 플레이 결과 추가
+        report_data["play_history"].append(play_result)
+
+        # report.json 저장
+        with open(self.report_file, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, ensure_ascii=False, indent=2)
+
+        print(f"플레이 결과 저장: {self.report_file}")
     
     def run(self):
         """
@@ -202,6 +235,7 @@ class DinoGameBot:
         print("=" * 60 + "\n")
 
         self.running = True
+        self.play_start_time = datetime.now()
         self.speed_controller.start()
         last_status_time = time.time()
 
@@ -250,6 +284,9 @@ class DinoGameBot:
             print(f"총 플레이 시간: {elapsed:.1f}초")
             print(f"총 점프 횟수: {self.jump_count}번")
             print(f"디버그 이미지: {self.jump_count}개 저장됨")
+
+            # 플레이 결과 저장
+            self.save_report(elapsed)
 
         self.running = False
 
