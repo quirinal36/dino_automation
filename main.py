@@ -28,6 +28,7 @@ class SpeedController:
         self.BASE_JUMP_COOLDOWN = 0.30
         self.BASE_DARK_RATIO = 0.05
         self.MIN_DARK_RATIO = 0.03
+        self.MAX_ROI_EXPAND_RATIO = 0.5  # 최대 50% ROI 확장
 
     def start(self):
         """게임 시작 시 호출"""
@@ -56,12 +57,19 @@ class SpeedController:
         factor = self.get_speed_factor()
         return self.BASE_DARK_RATIO - (self.BASE_DARK_RATIO - self.MIN_DARK_RATIO) * (factor - 1.0) / (self.MAX_SPEED_FACTOR - 1.0)
 
+    def get_roi_expand_ratio(self):
+        """동적 ROI 확장 비율 반환 (속도에 비례하여 ROI 확장)"""
+        factor = self.get_speed_factor()
+        # 속도 1.0일 때 0%, 최대 속도일 때 MAX_ROI_EXPAND_RATIO%
+        return self.MAX_ROI_EXPAND_RATIO * (factor - 1.0) / (self.MAX_SPEED_FACTOR - 1.0)
+
 
 class DinoGameBot:
     def __init__(self, config_file='roi_config.json'):
         """초기화"""
         self.config_file = config_file
         self.roi = None
+        self.base_roi = None  # 기본 ROI (동적 확장의 기준)
         self.running = False
         self.jump_count = 0
         self.debug_folder = 'debug_captures'
@@ -89,8 +97,9 @@ class DinoGameBot:
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            
+
             self.roi = config['roi']
+            self.base_roi = dict(self.roi)  # 기본 ROI 복사 저장
             print(f"ROI 설정 로드 완료:")
             print(f"  좌표: ({self.roi['x1']}, {self.roi['y1']}) ~ ({self.roi['x2']}, {self.roi['y2']})")
             print(f"  크기: {config['width']} x {config['height']}")
@@ -104,18 +113,39 @@ class DinoGameBot:
             print(f"ROI 설정 로드 중 오류 발생: {e}")
             return False
     
+    def get_dynamic_roi(self):
+        """속도에 따라 동적으로 이동된 ROI 반환 (오른쪽으로 이동)"""
+        if self.base_roi is None:
+            return self.roi
+
+        expand_ratio = self.speed_controller.get_roi_expand_ratio()
+        base_width = self.base_roi['x2'] - self.base_roi['x1']
+
+        # x축 양의 방향(오른쪽)으로 이동 (장애물을 더 일찍 감지)
+        shift_pixels = int(base_width * expand_ratio)
+
+        return {
+            'x1': self.base_roi['x1'] + shift_pixels,  # 오른쪽으로 이동
+            'y1': self.base_roi['y1'],
+            'x2': self.base_roi['x2'] + shift_pixels,  # 오른쪽으로 이동
+            'y2': self.base_roi['y2']
+        }
+
     def capture_roi(self):
-        """ROI 영역만 캡처"""
+        """ROI 영역만 캡처 (속도에 따라 동적 확장)"""
         # 전체 화면 캡처
         screenshot = ImageGrab.grab()
         screenshot_np = np.array(screenshot)
-        
+
+        # 동적 ROI 가져오기
+        dynamic_roi = self.get_dynamic_roi()
+
         # ROI 영역 추출
         roi_img = screenshot_np[
-            self.roi['y1']:self.roi['y2'],
-            self.roi['x1']:self.roi['x2']
+            dynamic_roi['y1']:dynamic_roi['y2'],
+            dynamic_roi['x1']:dynamic_roi['x2']
         ]
-        
+
         return roi_img
     
     def check_dark_mode(self, dark_ratio):
@@ -178,11 +208,34 @@ class DinoGameBot:
         
         return filename
     
-    def jump(self):
-        """스페이스바를 눌러 점프"""
-        pyautogui.press('space')
+    def jump(self, detect_ratio=0.10):
+        """
+        스페이스바를 눌러 점프 (픽셀 비율에 따라 점프 강도 조절)
+
+        Args:
+            detect_ratio: 감지된 픽셀 비율 (0.0 ~ 1.0)
+        """
+        # 픽셀 비율에 따른 점프 강도 결정
+        WEAK_JUMP_THRESHOLD = 0.07  # 7% 이하면 약한 점프
+        WEAK_JUMP_DURATION = 0.001   # 약한 점프: 1ms
+        STRONG_JUMP_DURATION = 0.15  # 강한 점프: 150ms
+
+        if detect_ratio <= WEAK_JUMP_THRESHOLD:
+            # 약한 점프 (작은 장애물)
+            jump_duration = WEAK_JUMP_DURATION
+            jump_type = "약한"
+        else:
+            # 강한 점프 (큰 장애물)
+            jump_duration = STRONG_JUMP_DURATION
+            jump_type = "강한"
+
+        # 스페이스바 누르기 (시간 조절)
+        pyautogui.keyDown('space')
+        time.sleep(jump_duration)
+        pyautogui.keyUp('space')
+
         self.jump_count += 1
-        print(f"점프! (총 {self.jump_count}번)")
+        print(f"{jump_type} 점프! (총 {self.jump_count}번, {jump_duration*1000:.0f}ms)")
 
     def save_report(self, elapsed_time):
         """플레이 결과를 report.json에 저장"""
@@ -251,7 +304,9 @@ class DinoGameBot:
                     factor = self.speed_controller.get_speed_factor()
                     elapsed = time.time() - self.speed_controller.start_time
                     mode_str = "다크" if self.dark_mode else "라이트"
-                    print(f"[속도] {elapsed:.0f}초 | {factor:.2f}x | 모드: {mode_str} | 체크: {check_interval*1000:.0f}ms | 쿨다운: {jump_cooldown*1000:.0f}ms | 임계값: {ratio_threshold*100:.1f}%")
+                    base_width = self.base_roi['x2'] - self.base_roi['x1']
+                    shift_pixels = int(base_width * self.speed_controller.get_roi_expand_ratio())
+                    print(f"[속도] {elapsed:.0f}초 | {factor:.2f}x | 모드: {mode_str} | ROI이동: +{shift_pixels}px | 체크: {check_interval*1000:.0f}ms")
                     last_status_time = time.time()
 
                 # ROI 영역 캡처
@@ -263,8 +318,8 @@ class DinoGameBot:
                 )
 
                 if is_obstacle:
-                    # 점프 실행
-                    self.jump()
+                    # 점프 실행 (픽셀 비율에 따라 강도 조절)
+                    self.jump(detect_ratio)
 
                     # 디버그 이미지 저장
                     saved_file = self.save_debug_image(roi_img, self.jump_count)
