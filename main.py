@@ -216,7 +216,7 @@ class DinoGameBot:
             detect_ratio: 감지된 픽셀 비율 (0.0 ~ 1.0)
         """
         # 픽셀 비율에 따른 점프 강도 결정
-        WEAK_JUMP_THRESHOLD = 0.07  # 7% 이하면 약한 점프
+        WEAK_JUMP_THRESHOLD = 0.1  # 7% 이하면 약한 점프
         WEAK_JUMP_DURATION = 0.001   # 약한 점프: 1ms
         STRONG_JUMP_DURATION = 0.15  # 강한 점프: 150ms
 
